@@ -1,86 +1,95 @@
+from typing import Any
+
 from homeassistant.core import callback
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api.const import AuxProducts, AC_POWER, HP_HEATER_POWER
+from .api.const import AuxProducts
 from .const import _LOGGER, DOMAIN, MANUFACTURER, MAX_FAILED_POLLS
 
 
 class DeviceStateHelper:
-    """Helper class to manage device parameters cache, failsafe, and optimistic updates."""
+    """Helper class to manage device parameters state, failsafe, and optimistic updates."""
 
-    def __init__(self, initial_params: dict, max_failed_polls: int):
-        self._cached_params = initial_params.copy() if initial_params else {}
+    def __init__(self, initial_params: dict[str, Any], max_failed_polls: int):
+        self._cached_params: dict[str, Any] = initial_params.copy() if initial_params else {}
         self._failed_poll_count = 0
         self._max_failed_polls = max_failed_polls
-        self._backup_params = {}
-        self._last_logged_payload = None
+        self._backup_params: dict[str, Any] = {}
+        self._last_logged_payload: str | None = None
+
+    @property
+    def current_params(self) -> dict[str, Any]:
+        """Return the current verified parameters."""
+        return self._cached_params
 
     def is_available(self) -> bool:
         """Determines if the entity should be marked as available."""
         return bool(len(self._cached_params) > 0 and self._failed_poll_count <= self._max_failed_polls)
 
-    def process_new_payload(self, current_params: dict, device_name: str) -> dict:
-        """Process incoming payload exactly ONCE per update cycle."""
+    def process_new_payload(self, current_params: dict[str, Any], device_name: str):
+        """Orchestrates the processing of incoming payloads."""
+        self._log_payload_if_changed(current_params, device_name)
 
+        if not current_params:
+            self._handle_empty_payload(device_name)
+            return
+
+        self._handle_valid_payload(current_params, device_name)
+
+    def _log_payload_if_changed(self, current_params: dict[str, Any], device_name: str):
+        """Logs the raw payload only if it differs from the last logged one."""
         current_payload_str = str(current_params)
         if current_payload_str != self._last_logged_payload:
             _LOGGER.debug("State changed or new poll. Raw payload for %s: %s", device_name, current_params)
             self._last_logged_payload = current_payload_str
 
-        is_valid_payload = bool(
-            current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
-        )
-
-        if is_valid_payload:
-            if self._failed_poll_count > 0:
-                _LOGGER.info(
-                    "Device %s connection restored after %s failed attempts.",
-                    device_name, self._failed_poll_count
-                )
-            self._failed_poll_count = 0
-            self._cached_params = current_params.copy()
-            return current_params
-
+    def _handle_empty_payload(self, device_name: str):
+        """Handles network errors or empty responses, managing the failsafe counter."""
         self._failed_poll_count += 1
 
-        if self._cached_params and self._failed_poll_count <= self._max_failed_polls:
+        if self._failed_poll_count <= self._max_failed_polls:
             _LOGGER.warning(
-                "Invalid payload for device %s (Attempt %s/%s). Missing power state. "
-                "Received: %s. Using cache to prevent flapping.",
-                device_name, self._failed_poll_count, self._max_failed_polls, current_params
+                "Empty payload for device %s (Attempt %s/%s). Using cache to prevent flapping.",
+                device_name, self._failed_poll_count, self._max_failed_polls
             )
-            return self._cached_params
+            return
 
         if self._failed_poll_count == self._max_failed_polls + 1:
             _LOGGER.error(
-                "Device %s has not returned valid power state for %s consecutive polls. "
-                "Last received payload: %s. Marking as unavailable.",
-                device_name, self._failed_poll_count, current_params
+                "Device %s dropped connection for %s polls. Marking as unavailable.",
+                device_name, self._failed_poll_count
+            )
+            self._cached_params = {}
+
+    def _handle_valid_payload(self, current_params: dict[str, Any], device_name: str):
+        """Merges a valid partial or full payload into the cache and resets counters."""
+        if self._failed_poll_count > 0:
+            _LOGGER.info(
+                "Device %s connection restored after %s failed attempts.",
+                device_name, self._failed_poll_count
             )
 
-        return {}
+        self._failed_poll_count = 0
+        self._cached_params.update(current_params)
 
-    def apply_optimistic(self, target_params_dict: dict, new_params: dict):
+    def apply_optimistic(self, new_params: dict[str, Any]):
         """Applies new params optimistically and saves a backup for rollback."""
         self._backup_params.clear()
 
-        for key in new_params:
-            if key in target_params_dict:
-                self._backup_params[key] = target_params_dict[key]
+        for key, value in new_params.items():
+            if key in self._cached_params:
+                self._backup_params[key] = self._cached_params[key]
+            self._cached_params[key] = value
 
-        target_params_dict.update(new_params)
-        self._cached_params.update(new_params)
         self._last_logged_payload = None
 
-    def rollback(self, target_params_dict: dict, failed_params: dict):
+    def rollback(self, failed_params: dict[str, Any]):
         """Rolls back the optimistic update if API call fails."""
         for key in failed_params:
             if key in self._backup_params:
-                target_params_dict[key] = self._backup_params[key]
                 self._cached_params[key] = self._backup_params[key]
             else:
-                target_params_dict.pop(key, None)
                 self._cached_params.pop(key, None)
         self._backup_params.clear()
         self._last_logged_payload = None
@@ -89,7 +98,7 @@ class DeviceStateHelper:
 class BaseEntity(CoordinatorEntity):
     """Base class for all AUX Cloud entities."""
 
-    def __init__(self, coordinator, device_id, entity_description):
+    def __init__(self, coordinator: Any, device_id: str, entity_description: Any):
         """Initialize the entity."""
         super().__init__(coordinator)
         self._device_id = device_id
@@ -104,8 +113,8 @@ class BaseEntity(CoordinatorEntity):
         self._state_helper = DeviceStateHelper(initial_params, MAX_FAILED_POLLS)
 
     @property
-    def unique_id(self):
-        """Return a unique ID for the sensor."""
+    def unique_id(self) -> str | None:
+        """Return a unique ID for the entity."""
         return self._attr_unique_id
 
     @property
@@ -124,7 +133,7 @@ class BaseEntity(CoordinatorEntity):
         return info
 
     @property
-    def available(self):
+    def available(self) -> bool:
         """Return True if entity is available."""
         return (
                 self._device is not None
@@ -141,37 +150,28 @@ class BaseEntity(CoordinatorEntity):
         raw_params = self._device.get("params", {})
         device_name = self._device.get("friendlyName", self._device_id)
 
-        safe_params = self._state_helper.process_new_payload(raw_params, device_name)
-
-        if self._device is not None:
-            self._device["params"] = safe_params
+        # Helper is now the source of truth for params
+        self._state_helper.process_new_payload(raw_params, device_name)
 
         self.async_write_ha_state()
 
-    def _get_device_params(self):
-        """Get device parameters securely and statically."""
-        return self._device.get("params", {}) if self._device else {}
+    def _get_device_params(self) -> dict[str, Any]:
+        """Get device parameters securely from the state helper."""
+        return self._state_helper.current_params
 
-    async def _set_device_params(self, params: dict):
+    async def _set_device_params(self, params: dict[str, Any]):
         """Set parameters on the device using Optimistic Updates via Helper."""
         device_name = self._device.get("friendlyName", self._device_id)
         _LOGGER.debug("Optimistically setting %s for device %s", params, device_name)
 
-        if self._device is not None:
-            if "params" not in self._device:
-                self._device["params"] = {}
-
-            self._state_helper.apply_optimistic(self._device["params"], params)
-
+        # Apply changes to the internal state immediately
+        self._state_helper.apply_optimistic(params)
         self.async_write_ha_state()
 
         try:
             await self.coordinator.api.set_device_params(self._device, params)
         except Exception as err:
             _LOGGER.error("Failed to apply setting %s to %s: %s", params, device_name, err)
-
-            if self._device is not None and "params" in self._device:
-                self._state_helper.rollback(self._device["params"], params)
-
+            self._state_helper.rollback(params)
             self.async_write_ha_state()
             raise
