@@ -2,7 +2,7 @@ from homeassistant.core import callback
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api.const import AuxProducts
+from .api.const import AuxProducts, AC_POWER, HP_HEATER_POWER
 from .const import _LOGGER, DOMAIN, MANUFACTURER, MAX_FAILED_POLLS
 
 
@@ -23,7 +23,11 @@ class DeviceStateHelper:
 
     def get_safe_params(self, current_params: dict, device_name: str) -> dict:
         """Returns valid params from API or falls back to cache."""
-        if current_params and len(current_params) > 0:
+        _LOGGER.debug("Received raw payload for %s: %s", device_name, current_params)
+
+        is_valid_payload = current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
+
+        if is_valid_payload:
             if self._failed_poll_count > 0:
                 _LOGGER.info(
                     "Device %s connection restored after %s failed attempts.",
@@ -37,15 +41,17 @@ class DeviceStateHelper:
 
         if self._cached_params and self._failed_poll_count <= self._max_failed_polls:
             _LOGGER.warning(
-                "Missing params for device %s (Attempt %s/%s). Using cached parameters to prevent flapping.",
-                device_name, self._failed_poll_count, self._max_failed_polls
+                "Invalid payload for device %s (Attempt %s/%s). Missing power state. "
+                "Received: %s. Using cache to prevent flapping.",
+                device_name, self._failed_poll_count, self._max_failed_polls, current_params
             )
             return self._cached_params
 
         if self._failed_poll_count == self._max_failed_polls + 1:
             _LOGGER.error(
-                "Device %s has not returned valid parameters for %s consecutive polls. Marking as unavailable.",
-                device_name, self._failed_poll_count
+                "Device %s has not returned valid power state for %s consecutive polls. "
+                "Last received payload: %s. Marking as unavailable.",
+                device_name, self._failed_poll_count, current_params
             )
 
         return {}
