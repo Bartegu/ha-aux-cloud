@@ -14,16 +14,26 @@ class DeviceStateHelper:
         self._failed_poll_count = 0
         self._max_failed_polls = max_failed_polls
         self._backup_params = {}
+        self._last_logged_payload = None
 
     def is_available(self, current_params: dict) -> bool:
         """Determines if the entity should be marked as available."""
-        has_fresh_data = len(current_params) > 0
-        has_valid_cache = len(self._cached_params) > 0 and self._failed_poll_count <= self._max_failed_polls
+        has_fresh_data = bool(
+            current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
+        )
+        has_valid_cache = bool(
+            len(self._cached_params) > 0 and self._failed_poll_count <= self._max_failed_polls
+        )
+
         return has_fresh_data or has_valid_cache
 
     def get_safe_params(self, current_params: dict, device_name: str) -> dict:
         """Returns valid params from API or falls back to cache."""
-        _LOGGER.debug("Received raw payload for %s: %s", device_name, current_params)
+
+        current_payload_str = str(current_params)
+        if current_payload_str != self._last_logged_payload:
+            _LOGGER.debug("State changed or new poll. Raw payload for %s: %s", device_name, current_params)
+            self._last_logged_payload = current_payload_str
 
         is_valid_payload = current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
 
@@ -57,20 +67,18 @@ class DeviceStateHelper:
         return {}
 
     def apply_optimistic(self, target_params_dict: dict, new_params: dict):
-        """Applies new params optimistically and saves a backup for rollback."""
         self._backup_params.clear()
 
-        # Backup only the keys we are about to change
         for key in new_params:
             if key in target_params_dict:
                 self._backup_params[key] = target_params_dict[key]
 
-        # Apply optimistically to both the device dictionary and our internal cache
         target_params_dict.update(new_params)
         self._cached_params.update(new_params)
 
+        self._last_logged_payload = None
+
     def rollback(self, target_params_dict: dict, failed_params: dict):
-        """Rolls back the optimistic update if API call fails."""
         for key in failed_params:
             if key in self._backup_params:
                 target_params_dict[key] = self._backup_params[key]
@@ -79,7 +87,7 @@ class DeviceStateHelper:
                 target_params_dict.pop(key, None)
                 self._cached_params.pop(key, None)
         self._backup_params.clear()
-
+        self._last_logged_payload = None
 
 class BaseEntity(CoordinatorEntity):
     def __init__(self, coordinator, device_id, entity_description):
