@@ -16,26 +16,21 @@ class DeviceStateHelper:
         self._backup_params = {}
         self._last_logged_payload = None
 
-    def is_available(self, current_params: dict) -> bool:
+    def is_available(self) -> bool:
         """Determines if the entity should be marked as available."""
-        has_fresh_data = bool(
-            current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
-        )
-        has_valid_cache = bool(
-            len(self._cached_params) > 0 and self._failed_poll_count <= self._max_failed_polls
-        )
+        return bool(len(self._cached_params) > 0 and self._failed_poll_count <= self._max_failed_polls)
 
-        return has_fresh_data or has_valid_cache
-
-    def get_safe_params(self, current_params: dict, device_name: str) -> dict:
-        """Returns valid params from API or falls back to cache."""
+    def process_new_payload(self, current_params: dict, device_name: str) -> dict:
+        """Process incoming payload exactly ONCE per update cycle."""
 
         current_payload_str = str(current_params)
         if current_payload_str != self._last_logged_payload:
             _LOGGER.debug("State changed or new poll. Raw payload for %s: %s", device_name, current_params)
             self._last_logged_payload = current_payload_str
 
-        is_valid_payload = current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
+        is_valid_payload = bool(
+            current_params and (AC_POWER in current_params or HP_HEATER_POWER in current_params)
+        )
 
         if is_valid_payload:
             if self._failed_poll_count > 0:
@@ -67,6 +62,7 @@ class DeviceStateHelper:
         return {}
 
     def apply_optimistic(self, target_params_dict: dict, new_params: dict):
+        """Applies new params optimistically and saves a backup for rollback."""
         self._backup_params.clear()
 
         for key in new_params:
@@ -75,10 +71,10 @@ class DeviceStateHelper:
 
         target_params_dict.update(new_params)
         self._cached_params.update(new_params)
-
         self._last_logged_payload = None
 
     def rollback(self, target_params_dict: dict, failed_params: dict):
+        """Rolls back the optimistic update if API call fails."""
         for key in failed_params:
             if key in self._backup_params:
                 target_params_dict[key] = self._backup_params[key]
@@ -89,7 +85,10 @@ class DeviceStateHelper:
         self._backup_params.clear()
         self._last_logged_payload = None
 
+
 class BaseEntity(CoordinatorEntity):
+    """Base class for all AUX Cloud entities."""
+
     def __init__(self, coordinator, device_id, entity_description):
         """Initialize the entity."""
         super().__init__(coordinator)
@@ -110,14 +109,14 @@ class BaseEntity(CoordinatorEntity):
         return self._attr_unique_id
 
     @property
-    def device_info(self):
+    def device_info(self) -> DeviceInfo:
         """Return the device info."""
         info = DeviceInfo(
-                identifiers={(DOMAIN, str(self._device_id))},
-                name=str(self._device.get("friendlyName", "AUX")),
-                manufacturer=MANUFACTURER,
-                model=str(AuxProducts.get_device_name(self._device.get("productId", None))),
-            )
+            identifiers={(DOMAIN, str(self._device_id))},
+            name=str(self._device.get("friendlyName", "AUX")),
+            manufacturer=MANUFACTURER,
+            model=str(AuxProducts.get_device_name(self._device.get("productId", None))),
+        )
 
         if "mac" in self._device and self._device["mac"]:
             info["connections"] = {(CONNECTION_NETWORK_MAC, str(self._device["mac"]))}
@@ -127,25 +126,31 @@ class BaseEntity(CoordinatorEntity):
     @property
     def available(self):
         """Return True if entity is available."""
-        current_params = self._device.get("params", {}) if self._device else {}
         return (
                 self._device is not None
                 and self._device.get("endpointId") is not None
-                and self._state_helper.is_available(current_params)
+                and self._state_helper.is_available()
         )
 
     @callback
     def _handle_coordinator_update(self):
+        """Handle updated data from the coordinator."""
         device_from_coordinator = self.coordinator.get_device_by_endpoint_id(self._device_id)
         self._device = device_from_coordinator or {}
+
+        raw_params = self._device.get("params", {})
+        device_name = self._device.get("friendlyName", self._device_id)
+
+        safe_params = self._state_helper.process_new_payload(raw_params, device_name)
+
+        if self._device is not None:
+            self._device["params"] = safe_params
+
         self.async_write_ha_state()
 
     def _get_device_params(self):
-        """Get device parameters securely via Helper."""
-        current_params = self._device.get("params", {})
-        device_name = self._device.get("friendlyName", self._device_id)
-
-        return self._state_helper.get_safe_params(current_params, device_name)
+        """Get device parameters securely and statically."""
+        return self._device.get("params", {}) if self._device else {}
 
     async def _set_device_params(self, params: dict):
         """Set parameters on the device using Optimistic Updates via Helper."""
