@@ -63,3 +63,5 @@ PLATFORMS = [
     Platform.SWITCH,
     Platform.NUMBER,
 ]
+
+MAX_FAILED_POLLS = 5
