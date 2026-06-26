@@ -152,3 +152,28 @@ async def test_coordinator_handle_exception_results(coordinator, mock_aux_cloud_
     assert "devices" in data
     assert len(data["devices"]) == 1
     assert data["devices"][0]["endpointId"] == "device1"
+
+
+def test_coordinator_reuses_state_helper_per_device(coordinator):
+    """Test coordinator returns the same helper instance per endpoint ID."""
+    helper_a = coordinator.get_state_helper("device1", {"pwr": 1})
+    helper_b = coordinator.get_state_helper("device1", {"pwr": 0, "temp": 230})
+
+    assert helper_a is helper_b
+    assert helper_a.current_params == {"pwr": 1}
+
+
+def test_state_helper_deduplicates_same_update_id(coordinator):
+    """Test helper processes a single coordinator update only once."""
+    helper = coordinator.get_state_helper("device1", {"pwr": 1})
+
+    helper.process_new_payload({}, "AC Unit 1", update_id=1)
+    helper.process_new_payload({}, "AC Unit 1", update_id=1)
+    helper.process_new_payload({}, "AC Unit 1", update_id=1)
+
+    assert helper.is_available() is True
+
+    for update_id in range(2, 7):
+        helper.process_new_payload({}, "AC Unit 1", update_id=update_id)
+
+    assert helper.is_available() is False

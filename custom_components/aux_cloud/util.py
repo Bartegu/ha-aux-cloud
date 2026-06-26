@@ -5,7 +5,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, Device
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api.const import AuxProducts
-from .const import _LOGGER, DOMAIN, MANUFACTURER, MAX_FAILED_POLLS
+from .const import _LOGGER, DOMAIN, MANUFACTURER
 
 
 class DeviceStateHelper:
@@ -17,6 +17,7 @@ class DeviceStateHelper:
         self._max_failed_polls = max_failed_polls
         self._backup_params: dict[str, Any] = {}
         self._last_logged_payload: str | None = None
+        self._last_processed_update_id: int | None = None
 
     @property
     def current_params(self) -> dict[str, Any]:
@@ -27,8 +28,19 @@ class DeviceStateHelper:
         """Determines if the entity should be marked as available."""
         return bool(len(self._cached_params) > 0 and self._failed_poll_count <= self._max_failed_polls)
 
-    def process_new_payload(self, current_params: dict[str, Any], device_name: str):
+    def process_new_payload(
+        self,
+        current_params: dict[str, Any],
+        device_name: str,
+        update_id: int | None = None,
+    ):
         """Orchestrates the processing of incoming payloads."""
+        if update_id is not None and update_id == self._last_processed_update_id:
+            return
+
+        if update_id is not None:
+            self._last_processed_update_id = update_id
+
         self._log_payload_if_changed(current_params, device_name)
 
         if not current_params:
@@ -110,7 +122,10 @@ class BaseEntity(CoordinatorEntity):
         )
 
         initial_params = self._device.get("params", {}) if self._device else {}
-        self._state_helper = DeviceStateHelper(initial_params, MAX_FAILED_POLLS)
+        self._state_helper = self.coordinator.get_state_helper(
+            self._device_id,
+            initial_params,
+        )
 
     @property
     def unique_id(self) -> str | None:
@@ -151,7 +166,11 @@ class BaseEntity(CoordinatorEntity):
         device_name = self._device.get("friendlyName", self._device_id)
 
         # Helper is now the source of truth for params
-        self._state_helper.process_new_payload(raw_params, device_name)
+        self._state_helper.process_new_payload(
+            raw_params,
+            device_name,
+            update_id=id(self.coordinator.data),
+        )
 
         self.async_write_ha_state()
 

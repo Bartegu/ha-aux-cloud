@@ -18,7 +18,9 @@ from .const import (
     DATA_AUX_CLOUD_CONFIG,
     PLATFORMS,
     CONF_SELECTED_DEVICES,
+    MAX_FAILED_POLLS,
 )
+from .util import DeviceStateHelper
 
 MIN_TIME_BETWEEN_UPDATES = timedelta(seconds=60)
 
@@ -91,6 +93,7 @@ class AuxCloudCoordinator(DataUpdateCoordinator):
         self.password = password
         self.selected_device_ids = selected_device_ids
         self.devices = []
+        self._device_state_helpers: dict[str, DeviceStateHelper] = {}
 
     def get_device_by_endpoint_id(self, endpoint_id: str):
         """Get a device by its endpoint ID."""
@@ -102,6 +105,14 @@ class AuxCloudCoordinator(DataUpdateCoordinator):
             ),
             None,
         )
+
+    def get_state_helper(self, endpoint_id: str, initial_params: dict) -> DeviceStateHelper:
+        """Get or create a shared state helper for a single physical device."""
+        helper = self._device_state_helpers.get(endpoint_id)
+        if helper is None:
+            helper = DeviceStateHelper(initial_params, MAX_FAILED_POLLS)
+            self._device_state_helpers[endpoint_id] = helper
+        return helper
 
     async def _async_update_data(self):
         """Fetch data from AUX Cloud."""
@@ -158,6 +169,15 @@ class AuxCloudCoordinator(DataUpdateCoordinator):
 
             self.devices = all_devices
             _LOGGER.debug("Fetched AUX Cloud data: %s devices", len(self.devices))
+
+            current_endpoint_ids = {
+                device["endpointId"]
+                for device in self.devices
+                if "endpointId" in device
+            }
+            stale_helpers = set(self._device_state_helpers) - current_endpoint_ids
+            for endpoint_id in stale_helpers:
+                self._device_state_helpers.pop(endpoint_id, None)
 
             self.async_set_updated_data({"devices": self.devices})
 
